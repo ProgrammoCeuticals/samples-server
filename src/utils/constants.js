@@ -1,11 +1,5 @@
 const VALID_CHECK_VALUES = ["YES", "NO", "PENDING"];
-const VALID_STATUSES = [
-  "SUBMITTED",
-  "IN_REVIEW",
-  "APPROVED",
-  "REJECTED",
-  "RETURNED",
-];
+const VALID_STATUSES = ["RECEIVED", "REJECTED"];
 
 module.exports = {
   VALID_CHECK_VALUES,

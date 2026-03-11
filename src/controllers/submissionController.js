@@ -1,7 +1,12 @@
 const Template = require("../models/Template");
 const Submission = require("../models/Submission");
+const XLSX = require("xlsx");
 const { generateTrackingNumber } = require("../utils/tracking");
 const { VALID_CHECK_VALUES, VALID_STATUSES } = require("../utils/constants");
+
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const MIN_MONTHS_BEFORE_EXPIRY = 6;
+const PHONE_PATTERN = /^[+]?[\d\s().-]{7,20}$/;
 
 function normalizeMap(mapValue) {
   if (!mapValue) {
@@ -57,6 +62,69 @@ function normalizeProductSampleAnswers(template, answers) {
   return normalized;
 }
 
+function parseDateInput(rawValue, fieldLabel) {
+  const value = `${rawValue || ""}`.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`${fieldLabel} must be a valid date`);
+  }
+
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`${fieldLabel} must be a valid date`);
+  }
+
+  return parsed;
+}
+
+function toUtcDateOnly(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function addUtcMonths(date, months) {
+  const day = date.getUTCDate();
+  const shifted = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+  shifted.setUTCMonth(shifted.getUTCMonth() + months);
+
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 0)
+  ).getUTCDate();
+
+  shifted.setUTCDate(Math.min(day, lastDayOfTargetMonth));
+  return shifted;
+}
+
+function validateProductDateRules(productSampleAnswers) {
+  const manufacturingRaw = productSampleAnswers.product_manufacturing_date;
+  const expiryRaw = productSampleAnswers.product_expiration_date;
+
+  if (!manufacturingRaw || !expiryRaw) {
+    return;
+  }
+
+  const manufacturingDate = parseDateInput(
+    manufacturingRaw,
+    "Product manufacturing date"
+  );
+  const expiryDate = parseDateInput(expiryRaw, "Product expiration date");
+
+  if (manufacturingDate >= expiryDate) {
+    throw new Error("Product expiration date must be after manufacturing date");
+  }
+
+  const today = toUtcDateOnly(new Date());
+  const minimumAllowedExpiry = addUtcMonths(today, MIN_MONTHS_BEFORE_EXPIRY);
+
+  if (expiryDate < minimumAllowedExpiry) {
+    const remainingDays = Math.floor((expiryDate - today) / DAY_IN_MS);
+
+    if (remainingDays < 0) {
+      throw new Error("Product has already expired");
+    }
+
+    throw new Error("Product expiration date must be at least 6 months from today");
+  }
+}
+
 function parseStatus(value) {
   const status = `${value || ""}`.toUpperCase();
   if (!VALID_STATUSES.includes(status)) {
@@ -75,7 +143,7 @@ function parseChecklistStatus(value) {
 
 async function createSubmission(req, res, next) {
   try {
-    const { templateId, applicantName, productName, productSampleAnswers } = req.body;
+    const { templateId, applicantName, applicantPhone, productName, productSampleAnswers } = req.body;
 
     const template = await Template.findOne({ templateId });
     if (!template) {
@@ -84,6 +152,7 @@ async function createSubmission(req, res, next) {
     }
 
     const cleanApplicantName = `${applicantName || ""}`.trim();
+    const cleanApplicantPhone = `${applicantPhone || ""}`.trim();
     const cleanProductName = `${productName || ""}`.trim();
 
     if (!cleanApplicantName) {
@@ -96,7 +165,18 @@ async function createSubmission(req, res, next) {
       return;
     }
 
+    if (!cleanApplicantPhone) {
+      res.status(400).json({ error: "Applicant phone number is required" });
+      return;
+    }
+
+    if (!PHONE_PATTERN.test(cleanApplicantPhone)) {
+      res.status(400).json({ error: "Applicant phone number is invalid" });
+      return;
+    }
+
     const normalizedAnswers = normalizeProductSampleAnswers(template, productSampleAnswers);
+    validateProductDateRules(normalizedAnswers);
     const now = new Date();
     const trackingNumber = await generateTrackingNumber(template.templateId, now);
 
@@ -105,10 +185,11 @@ async function createSubmission(req, res, next) {
       templateId: template.templateId,
       templateSnapshot: template.toObject(),
       applicantName: cleanApplicantName,
+      applicantPhone: cleanApplicantPhone,
       productName: cleanProductName,
       productSampleAnswers: normalizedAnswers,
       documentsChecklist: buildDefaultDocumentChecklist(template),
-      status: "SUBMITTED",
+      status: "RECEIVED",
       decisionRemark: "",
       reviewedBy: "",
       clientSubmittedAt: now,
@@ -140,7 +221,7 @@ async function listSubmissions(req, res, next) {
     const submissions = await Submission.find(filters)
       .sort({ createdAt: -1 })
       .select(
-        "trackingNumber templateId applicantName productName status createdAt updatedAt templateSnapshot.title"
+        "trackingNumber templateId applicantName applicantPhone productName status createdAt updatedAt templateSnapshot.title"
       )
       .lean();
 
@@ -150,6 +231,7 @@ async function listSubmissions(req, res, next) {
       templateId: item.templateId,
       templateTitle: item.templateSnapshot?.title || "",
       applicantName: item.applicantName,
+      applicantPhone: item.applicantPhone || "",
       productName: item.productName,
       status: item.status,
       createdAt: item.createdAt,
@@ -202,11 +284,21 @@ async function updateDocumentsChecklist(req, res, next) {
       };
     });
 
-    if (req.body.status) {
-      submission.status = parseStatus(req.body.status);
-    } else if (submission.status === "SUBMITTED") {
-      submission.status = "IN_REVIEW";
+    const currentStatus = `${submission.status || ""}`.toUpperCase();
+    const nextStatus = req.body.status
+      ? parseStatus(req.body.status)
+      : VALID_STATUSES.includes(currentStatus)
+        ? currentStatus
+        : "RECEIVED";
+    const decisionRemark = `${req.body.decisionRemark || submission.decisionRemark || ""}`.trim();
+
+    if (nextStatus === "REJECTED" && !decisionRemark) {
+      res.status(400).json({ error: "Rejection reason is required when status is REJECTED" });
+      return;
     }
+
+    submission.status = nextStatus;
+    submission.decisionRemark = nextStatus === "REJECTED" ? decisionRemark : "";
 
     submission.reviewedBy = `${req.body.reviewedBy || submission.reviewedBy || ""}`.trim();
     submission.adminReviewedAt = new Date();
@@ -228,8 +320,16 @@ async function updateSubmissionStatus(req, res, next) {
       return;
     }
 
-    submission.status = parseStatus(req.body.status);
-    submission.decisionRemark = `${req.body.decisionRemark || submission.decisionRemark || ""}`.trim();
+    const nextStatus = parseStatus(req.body.status);
+    const decisionRemark = `${req.body.decisionRemark || submission.decisionRemark || ""}`.trim();
+
+    if (nextStatus === "REJECTED" && !decisionRemark) {
+      res.status(400).json({ error: "Rejection reason is required when status is REJECTED" });
+      return;
+    }
+
+    submission.status = nextStatus;
+    submission.decisionRemark = nextStatus === "REJECTED" ? decisionRemark : "";
     submission.reviewedBy = `${req.body.reviewedBy || submission.reviewedBy || ""}`.trim();
     submission.adminReviewedAt = new Date();
 
@@ -260,6 +360,107 @@ async function getExportPayload(req, res, next) {
   }
 }
 
+function buildAllSubmissionsExcelRows(submissions) {
+  const sampleCodeToLabel = new Map();
+  const checklistCodeToLabel = new Map();
+  const sampleCodes = new Set();
+  const checklistCodes = new Set();
+
+  for (const submission of submissions) {
+    for (const item of submission.templateSnapshot?.productSample || []) {
+      sampleCodes.add(item.code);
+      if (!sampleCodeToLabel.has(item.code)) {
+        sampleCodeToLabel.set(item.code, item.label || item.code);
+      }
+    }
+
+    for (const item of submission.templateSnapshot?.documentsRequired || []) {
+      checklistCodes.add(item.code);
+      if (!checklistCodeToLabel.has(item.code)) {
+        checklistCodeToLabel.set(item.code, item.label || item.code);
+      }
+    }
+  }
+
+  const orderedSampleCodes = Array.from(sampleCodes).sort((left, right) => left.localeCompare(right));
+  const orderedChecklistCodes = Array.from(checklistCodes).sort((left, right) =>
+    left.localeCompare(right)
+  );
+
+  return submissions.map((submission) => {
+    const answers = normalizeMap(submission.productSampleAnswers || {});
+    const checklistEntries = new Map(
+      (submission.documentsChecklist || []).map((entry) => [entry.code, entry])
+    );
+
+    const row = {
+      "Tracking Number": submission.trackingNumber || "",
+      "Template ID": submission.templateId || "",
+      "Template Title": submission.templateSnapshot?.title || "",
+      "Applicant Name": submission.applicantName || "",
+      "Applicant Phone": submission.applicantPhone || "",
+      "Product Name": submission.productName || "",
+      Status: submission.status || "",
+      "Client Submitted At": submission.clientSubmittedAt
+        ? new Date(submission.clientSubmittedAt).toISOString()
+        : "",
+      "Admin Reviewed At": submission.adminReviewedAt
+        ? new Date(submission.adminReviewedAt).toISOString()
+        : "",
+      "Received By": submission.reviewedBy || "",
+      "Rejection Reason": submission.decisionRemark || "",
+      "Created At": submission.createdAt ? new Date(submission.createdAt).toISOString() : "",
+      "Updated At": submission.updatedAt ? new Date(submission.updatedAt).toISOString() : "",
+    };
+
+    for (const code of orderedSampleCodes) {
+      const label = sampleCodeToLabel.get(code) || code;
+      row[`Sample: ${label}`] = answers[code] || "";
+    }
+
+    for (const code of orderedChecklistCodes) {
+      const label = checklistCodeToLabel.get(code) || code;
+      const entry = checklistEntries.get(code);
+      row[`Checklist: ${label} (Status)`] = entry?.status || "";
+      row[`Checklist: ${label} (Remark)`] = entry?.remark || "";
+    }
+
+    return row;
+  });
+}
+
+async function exportAllSubmissionsToExcel(req, res, next) {
+  try {
+    const submissions = await Submission.find({})
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const rows = buildAllSubmissionsExcelRows(submissions);
+    const worksheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{ Note: "No submissions available" }]);
+    const workbook = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Submissions");
+
+    const fileBuffer = XLSX.write(workbook, {
+      type: "buffer",
+      bookType: "xlsx",
+    });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="samples-submissions-${dateTag}.xlsx"`
+    );
+    res.send(fileBuffer);
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   createSubmission,
   listSubmissions,
@@ -267,4 +468,5 @@ module.exports = {
   updateDocumentsChecklist,
   updateSubmissionStatus,
   getExportPayload,
+  exportAllSubmissionsToExcel,
 };

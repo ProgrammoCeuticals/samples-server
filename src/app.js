@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 
+const adminRoutes = require("./routes/adminRoutes");
 const templateRoutes = require("./routes/templateRoutes");
 const submissionRoutes = require("./routes/submissionRoutes");
 
@@ -9,8 +10,9 @@ const app = express();
 
 app.use(
   cors({
-    origin: process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(",") : "*",
-    credentials: true,
+    origin: "*",
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 app.use(express.json({ limit: "1mb" }));
@@ -20,6 +22,7 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "samples-server" });
 });
 
+app.use("/api/admin", adminRoutes);
 app.use("/api/templates", templateRoutes);
 app.use("/api/submissions", submissionRoutes);
 
