@@ -18,6 +18,20 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "samples-server",
+    message: "Samples API is running",
+    endpoints: {
+      health: "/api/health",
+      templates: "/api/templates",
+      submissions: "/api/submissions",
+      adminLogin: "/api/admin/login",
+    },
+  });
+});
+
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "samples-server" });
 });
