@@ -5,6 +5,7 @@ const morgan = require("morgan");
 const adminRoutes = require("./routes/adminRoutes");
 const templateRoutes = require("./routes/templateRoutes");
 const submissionRoutes = require("./routes/submissionRoutes");
+const { initializeApplicationData } = require("./config/bootstrap");
 
 const app = express();
 
@@ -34,6 +35,20 @@ app.get("/", (req, res) => {
 
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "samples-server" });
+});
+
+app.use("/api", async (req, res, next) => {
+  if (req.path === "/health") {
+    next();
+    return;
+  }
+
+  try {
+    await initializeApplicationData();
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use("/api/admin", adminRoutes);
