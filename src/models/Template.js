@@ -7,6 +7,8 @@ const checklistItemSchema = new mongoose.Schema(
     label: { type: String, required: true },
     inputType: { type: String },
     required: { type: Boolean },
+    defaultValue: { type: String, default: "" },
+    readOnly: { type: Boolean, default: false },
   },
   { _id: false }
 );

@@ -2,6 +2,7 @@ const express = require("express");
 const { requireAdminAuth } = require("../middleware/requireAdminAuth");
 const {
   createSubmission,
+  importManifestRows,
   listSubmissions,
   getSubmissionById,
   updateDocumentsChecklist,
@@ -16,6 +17,7 @@ router.post("/", createSubmission);
 
 router.use(requireAdminAuth);
 
+router.post("/import/manifest", importManifestRows);
 router.get("/export/all.xlsx", exportAllSubmissionsToExcel);
 router.get("/", listSubmissions);
 router.get("/:id/export", getExportPayload);
