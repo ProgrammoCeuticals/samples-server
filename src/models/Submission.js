@@ -52,4 +52,6 @@ const submissionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+submissionSchema.index({ "productSampleAnswers.batch_no": 1 });
+
 module.exports = mongoose.model("Submission", submissionSchema);

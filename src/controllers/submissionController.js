@@ -549,6 +549,25 @@ async function createSubmission(req, res, next) {
     }
 
     validateProductDateRules(normalizedAnswers);
+
+    const batchNumber = getAnswerValue(normalizedAnswers, BATCH_NUMBER_FIELD_CODE);
+    if (!batchNumber) {
+      res.status(400).json({ error: "Batch number is required" });
+      return;
+    }
+
+    const reasonForAnalysis = getAnswerValue(normalizedAnswers, REASON_FOR_ANALYSIS_FIELD_CODE);
+    if (!reasonForAnalysis) {
+      res.status(400).json({ error: "Reason for analysis is required" });
+      return;
+    }
+
+    const existing = await Submission.findOne({ [`productSampleAnswers.${BATCH_NUMBER_FIELD_CODE}`]: batchNumber }).lean();
+    if (existing) {
+      res.status(409).json({ error: `A submission with batch number "${batchNumber}" already exists (Tracking: ${existing.trackingNumber})` });
+      return;
+    }
+
     const now = new Date();
     const trackingNumber = await generateTrackingNumber(template.templateId, now);
 
@@ -651,8 +670,43 @@ async function importManifestRows(req, res, next) {
         return;
       }
 
+      if (!getManifestRowValue(row, "BATCH NO")) {
+        res.status(400).json({ error: `Manifest row ${index + 1} is missing a batch number` });
+        return;
+      }
+
+      if (!getManifestRowValue(row, "REASON FOR ANALYSIS")) {
+        res.status(400).json({ error: `Manifest row ${index + 1} is missing a reason for analysis` });
+        return;
+      }
+
       const trackingNumber = await generateTrackingNumber(template.templateId, importedAt);
       payloads.push(buildImportedSubmissionPayload(row, template, trackingNumber, importedAt));
+    }
+
+    const incomingBatchNumbers = payloads
+      .map((p) => getAnswerValue(p.productSampleAnswers, BATCH_NUMBER_FIELD_CODE));
+
+    const incomingDupes = incomingBatchNumbers.filter(
+      (b, i) => incomingBatchNumbers.indexOf(b) !== i
+    );
+    if (incomingDupes.length) {
+      res.status(409).json({ error: `Duplicate batch numbers within the uploaded manifest: ${[...new Set(incomingDupes)].map((b) => `"${b}"`).join(", ")}` });
+      return;
+    }
+
+    const duplicates = await Submission.find({
+      [`productSampleAnswers.${BATCH_NUMBER_FIELD_CODE}`]: { $in: incomingBatchNumbers },
+    })
+      .select(`productSampleAnswers.${BATCH_NUMBER_FIELD_CODE} trackingNumber`)
+      .lean();
+
+    if (duplicates.length) {
+      const dupeList = duplicates
+        .map((d) => `"${normalizeMap(d.productSampleAnswers)[BATCH_NUMBER_FIELD_CODE]}" (${d.trackingNumber})`)
+        .join(", ");
+      res.status(409).json({ error: `Duplicate batch numbers already exist in the register: ${dupeList}` });
+      return;
     }
 
     const submissions = await Submission.insertMany(payloads, { ordered: true });
@@ -717,6 +771,11 @@ async function listSubmissions(req, res, next) {
         status: item.status,
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
+        manufacturer: getAnswerValue(answers, MANUFACTURER_FIELD_CODE),
+        distributor:
+          getAnswerValue(answers, DISTRIBUTOR_FIELD_CODE) ||
+          getAnswerValue(answers, SOURCE_FIELD_CODE),
+        reasonForAnalysis: getAnswerValue(answers, REASON_FOR_ANALYSIS_FIELD_CODE),
         matchScore: scoreSubmissionSearchMatch(item, q),
       };
     });

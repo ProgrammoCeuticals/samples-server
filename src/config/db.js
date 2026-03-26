@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 
-const DEFAULT_MONGO_URI = "mongodb://127.0.0.1:27017/samples_app";
+const DEFAULT_MONGO_URI =
+  "mongodb+srv://programmoceuticals:%40ProgrammoCeuticals@cluster0.fnahhcq.mongodb.net/samples_app";
 let connectPromise = null;
 
 async function connectDb(mongoUri) {
