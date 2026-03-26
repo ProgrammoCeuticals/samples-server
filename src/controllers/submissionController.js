@@ -687,32 +687,36 @@ async function importManifestRows(req, res, next) {
     const incomingBatchNumbers = payloads
       .map((p) => getAnswerValue(p.productSampleAnswers, BATCH_NUMBER_FIELD_CODE));
 
-    const incomingDupes = incomingBatchNumbers.filter(
-      (b, i) => incomingBatchNumbers.indexOf(b) !== i
-    );
-    if (incomingDupes.length) {
-      res.status(409).json({ error: `Duplicate batch numbers within the uploaded manifest: ${[...new Set(incomingDupes)].map((b) => `"${b}"`).join(", ")}` });
-      return;
-    }
-
-    const duplicates = await Submission.find({
+    const existingDuplicates = await Submission.find({
       [`productSampleAnswers.${BATCH_NUMBER_FIELD_CODE}`]: { $in: incomingBatchNumbers },
     })
       .select(`productSampleAnswers.${BATCH_NUMBER_FIELD_CODE} trackingNumber`)
       .lean();
 
-    if (duplicates.length) {
-      const dupeList = duplicates
-        .map((d) => `"${normalizeMap(d.productSampleAnswers)[BATCH_NUMBER_FIELD_CODE]}" (${d.trackingNumber})`)
-        .join(", ");
-      res.status(409).json({ error: `Duplicate batch numbers already exist in the register: ${dupeList}` });
+    const existingBatchNumbers = new Set(
+      existingDuplicates.map((d) => normalizeMap(d.productSampleAnswers)[BATCH_NUMBER_FIELD_CODE])
+    );
+
+    const seenBatchNumbers = new Set();
+    const filteredPayloads = payloads.filter((p) => {
+      const batchNo = getAnswerValue(p.productSampleAnswers, BATCH_NUMBER_FIELD_CODE);
+      if (existingBatchNumbers.has(batchNo) || seenBatchNumbers.has(batchNo)) {
+        return false;
+      }
+      seenBatchNumbers.add(batchNo);
+      return true;
+    });
+
+    if (!filteredPayloads.length) {
+      res.status(409).json({ error: "All rows in this manifest already exist in the register (duplicate batch numbers)." });
       return;
     }
 
-    const submissions = await Submission.insertMany(payloads, { ordered: true });
+    const submissions = await Submission.insertMany(filteredPayloads, { ordered: true });
 
     res.status(201).json({
       importedCount: submissions.length,
+      skippedCount: payloads.length - filteredPayloads.length,
       submissions: submissions.map((submission) => serializeSubmission(submission)),
     });
   } catch (error) {
